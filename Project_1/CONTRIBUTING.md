@@ -8,7 +8,7 @@ From the repo root:
 python3 -m venv .venv
 source .venv/bin/activate        # run this in every new terminal
 pip install --upgrade pip
-pip install -r requirements.txt
+pip install -r requirements.yaml
 ```
 
 Check it worked:
@@ -25,14 +25,14 @@ If you install a new package, record it so everyone gets the same versions:
 
 ```bash
 pip install <package>
-pip freeze > requirements.txt
+pip freeze > requirements.yaml
 ```
 
-Commit `requirements.txt` in the same commit as the code that needs it.
+Commit `requirements.yaml` in the same commit as the code that needs it.
 After pulling changes from others, re-sync with:
 
 ```bash
-pip install -r requirements.txt
+pip install -r requirements.yaml
 ```
 
 Never commit the `.venv/` folder (it is in `.gitignore`).
@@ -62,6 +62,6 @@ On older Ubuntu/Debian use `qemu-system-misc` instead of `qemu-system-riscv`.
 
 ## 6. Troubleshooting
 
-- `ModuleNotFoundError: fuse`: the venv is not active, or `pip install -r requirements.txt` was not run.
+- `ModuleNotFoundError: fuse`: the venv is not active, or `pip install -r requirements.yaml` was not run.
 - `Transport endpoint is not connected`: a previous mount crashed. Run `fusermount3 -u <mountpoint>`.
 - `/dev/fuse: Permission denied`: make sure `fuse3` is installed and you are in the `fuse` group if your distro requires it.
