@@ -271,6 +271,7 @@ CMakeFiles/
 CMakeCache.txt
 cmake_install.cmake
 Makefile
+!Project_2/**/Makefile
 install_manifest.txt
 compile_commands.json
 
