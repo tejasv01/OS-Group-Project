@@ -1,7 +1,5 @@
-"""
-alloc.py - Block and inode allocation, plus file write logic for xv6.
-Matches kernel/fs.c (balloc, bfree, ialloc, itrunc, bmap, writei).
-"""
+# Block & inode allocation and writei/truncate for xv6.
+# Based on kernel/fs.c (balloc, bfree, ialloc, itrunc, bmap, writei).
 
 import errno
 import struct
@@ -11,14 +9,14 @@ from xv6defs import (
 )
 
 
-def balloc(img) -> int:
+def balloc(img):
     """Find a free block in the bitmap, zero it out, and return block number."""
     sb = img.sb
-    for b in range(0, sb.size, BPB):
-        bblock = BBLOCK(b, sb)
+    for base in range(0, sb.size, BPB):
+        bblock = BBLOCK(base, sb)
         buf = bytearray(img.read_block(bblock))
 
-        limit = min(BPB, sb.size - b)
+        limit = min(BPB, sb.size - base)
         for bi in range(limit):
             byte_idx = bi // 8
             bit_idx = bi % 8
@@ -28,7 +26,7 @@ def balloc(img) -> int:
                 buf[byte_idx] |= mask
                 img.write_block(bblock, bytes(buf))
 
-                blk = b + bi
+                blk = base + bi
                 # zero out the block before handing it out
                 img.write_block(blk, b'\x00' * BSIZE)
                 return blk
@@ -36,8 +34,7 @@ def balloc(img) -> int:
     raise OSError(errno.ENOSPC, "No free data blocks available")
 
 
-def bfree(img, b: int) -> None:
-    """Clear a block's bit in the free bitmap."""
+def bfree(img, b):
     sb = img.sb
     if b <= 0 or b >= sb.size:
         raise ValueError(f"Block number out of range: {b}")
@@ -54,8 +51,7 @@ def bfree(img, b: int) -> None:
     img.write_block(bblock, bytes(buf))
 
 
-def ialloc(img, type_: int) -> int:
-    """Find a free inode on disk, wipe its fields, and mark its type."""
+def ialloc(img, type_):
     sb = img.sb
     for inum in range(1, sb.ninodes):
         ip = img.read_dinode(inum)
@@ -72,13 +68,12 @@ def ialloc(img, type_: int) -> int:
     raise OSError(errno.ENOSPC, "No free inodes available")
 
 
-def ifree(img, inum: int) -> None:
-    """Mark an inode unused on disk."""
-    ip = Dinode()
-    img.write_dinode(inum, ip)
+def ifree(img, inum):
+    # writing an empty Dinode sets type back to T_UNUSED (0)
+    img.write_dinode(inum, Dinode())
 
 
-def bmap(img, inode: Dinode, inum: int, bn: int, alloc: bool = False) -> int:
+def bmap(img, inode, inum, bn, alloc=False):
     """Get disk block for logical block bn. Allocates if alloc is True."""
     if bn < 0 or bn >= MAXFILE:
         raise ValueError(f"Block number out of range: {bn}")
@@ -118,8 +113,7 @@ def bmap(img, inode: Dinode, inum: int, bn: int, alloc: bool = False) -> int:
     raise ValueError(f"Block number exceeds maximum file size: {bn}")
 
 
-def itrunc(img, inum: int) -> None:
-    """Free all direct and indirect data blocks for inode."""
+def itrunc(img, inum):
     ip = img.read_dinode(inum)
 
     for i in range(NDIRECT):
@@ -129,9 +123,9 @@ def itrunc(img, inum: int) -> None:
 
     indir = ip.addrs[NDIRECT]
     if indir != 0:
-        indir_data = img.read_block(indir)
+        indir_blk = img.read_block(indir)
         for j in range(NINDIRECT):
-            addr = struct.unpack_from("<I", indir_data, j * 4)[0]
+            addr = struct.unpack_from("<I", indir_blk, j * 4)[0]
             if addr != 0:
                 bfree(img, addr)
         bfree(img, indir)
@@ -141,7 +135,7 @@ def itrunc(img, inum: int) -> None:
     img.write_dinode(inum, ip)
 
 
-def writei(img, inum: int, data: bytes, offset: int) -> int:
+def writei(img, inum, data, offset):
     """Write data buffer into inode starting at offset."""
     if offset < 0:
         raise ValueError("Negative offset")
@@ -174,7 +168,7 @@ def writei(img, inum: int, data: bytes, offset: int) -> int:
     return written
 
 
-def truncate(img, inum: int, new_size: int) -> None:
+def truncate(img, inum, new_size):
     """Truncate or extend file to new_size bytes."""
     if new_size < 0:
         raise ValueError("Negative size")
@@ -187,7 +181,7 @@ def truncate(img, inum: int, new_size: int) -> None:
         return
 
     if new_size < ip.size:
-        # free any blocks completely past new_size
+        # free blocks completely beyond new_size
         first_free = (new_size + BSIZE - 1) // BSIZE
         old_last = (ip.size + BSIZE - 1) // BSIZE
 
@@ -206,14 +200,14 @@ def truncate(img, inum: int, new_size: int) -> None:
                         struct.pack_into("<I", data, idx * 4, 0)
                         img.write_block(ip.addrs[NDIRECT], bytes(data))
 
-        # if the indirect block has no entries left, free it too
+        # drop the indirect block too if nothing inside it is used anymore
         if ip.addrs[NDIRECT] != 0 and first_free <= NDIRECT:
             indir_data = img.read_block(ip.addrs[NDIRECT])
             if all(addr == 0 for addr, in struct.iter_unpack("<I", indir_data)):
                 bfree(img, ip.addrs[NDIRECT])
                 ip.addrs[NDIRECT] = 0
 
-        # zero out remainder of the partial block
+        # wipe tail bytes in the last partial block
         partial_off = new_size % BSIZE
         if partial_off != 0:
             last_bn = new_size // BSIZE

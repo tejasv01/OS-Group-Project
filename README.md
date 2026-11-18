@@ -111,7 +111,7 @@ Run with `make qemu CPUS=1` for deterministic scheduling when testing.
 │   ├── dirops.py                dirlink, create, mkdir, unlink
 │   ├── xv6fuse.py               FUSE wrapper (getattr, readdir, read, write, ...)
 │   ├── fsck.py                  consistency checker
-│   ├── NAMESPACE_OPERATIONS.md  namespace operations design & walkthrough
+│   ├── dirops_notes.md          notes on namespace ops and xv6 nlink rules
 │   ├── tests/                   Linux <-> xv6 test scripts and unit tests
 │   ├── requirements.txt         pinned Python dependencies
 │   └── CONTRIBUTING.md

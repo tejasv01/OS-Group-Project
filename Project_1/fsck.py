@@ -1,37 +1,15 @@
-"""
-fsck.py - Filesystem consistency checker for xv6 disk images.
-
-Validates:
-  1. Superblock integrity (magic number, field ordering, boundaries).
-  2. Inode validity (valid type, non-negative nlink/size).
-  3. Direct block pointers (within data block range).
-  4. Indirect block pointer and all entries it references.
-  5. Duplicate block allocation across different inodes.
-  6. Free block bitmap consistency:
-       - Every block used by an inode must be marked allocated.
-       - No data block should be marked allocated if no inode uses it.
-       - All metadata blocks must be marked allocated.
-  7. Directory entry validity:
-       - Inode numbers must be within range.
-       - '.' must point back to the directory itself.
-       - '..' must point to the known parent.
-       - Entries must not reference T_UNUSED inodes.
-  8. Inode link count consistency:
-       - Regular files: nlink == number of directory references.
-       - Directories: nlink == 1 + number of subdirectories.
-       - Device files: treated the same as regular files.
-  9. Directory size must be a multiple of DIRENT_SIZE.
-"""
+# Consistency checker (fsck) for xv6 fs.img disk images.
+# Checks superblock layout, inode types & block pointers, duplicate blocks,
+# bitmap vs referenced blocks, directory '.'/'..' links, and nlink counts.
 
 import sys
 import struct
 from collections import defaultdict
-from typing import Dict, Set, List
 
 from xv6defs import (
     BSIZE, BPB, IPB, FSMAGIC, ROOTINO,
     T_UNUSED, T_DIR, T_FILE, T_DEVICE,
-    NDIRECT, NINDIRECT, DIRENT_SIZE, Dinode, Dirent, BBLOCK
+    NDIRECT, NINDIRECT, DIRENT_SIZE, Dirent, BBLOCK
 )
 from xv6img import XV6Image
 
@@ -41,16 +19,13 @@ class ConsistencyError(Exception):
 
 
 class XV6Fsck:
-    def __init__(self, img_path: str):
-        # Open image in read-only mode so we never accidentally modify it.
-        # XV6Image validates the magic number on open; if it raises we catch
-        # it in run() and report it cleanly.
+    def __init__(self, img_path):
         self.img_path = img_path
         self.img = None
         self.sb = None
-        self.errors: List[str] = []
+        self.errors = []
 
-    def log_error(self, msg: str):
+    def log_error(self, msg):
         self.errors.append(msg)
 
     def close(self):
@@ -59,23 +34,16 @@ class XV6Fsck:
             self.img = None
 
     # ------------------------------------------------------------------
-    # Compute the first data block from the superblock fields,
-    # mirroring the formula used in create_empty_image() (xv6img.py).
+    # First data block from superblock fields (same formula as create_empty_image)
     # ------------------------------------------------------------------
-    def _compute_datastart(self) -> int:
+    def _compute_datastart(self):
         sb = self.sb
-        ninodeblocks = (sb.ninodes + IPB - 1) // IPB
-        nbmapblocks  = (sb.size   + BPB - 1) // BPB
+        nbmapblocks = (sb.size + BPB - 1) // BPB
         return sb.bmapstart + nbmapblocks
 
-    def run(self) -> bool:
+    def run(self):
         try:
-            # Try opening the image; XV6Image checks magic and raises ValueError
-            # on a bad superblock.  We catch that so fsck reports a clean error
-            # instead of an unhandled exception.
-            # Pre-read the superblock magic using a plain file handle so we
-            # can report a clean error without leaving an unclosed file when
-            # XV6Image raises ValueError on a bad magic number.
+            # Check magic manually first so a corrupt image doesn't blow up inside XV6Image()
             try:
                 with open(self.img_path, "rb") as raw_f:
                     raw_f.seek(BSIZE)        # block 1
@@ -99,25 +67,20 @@ class XV6Fsck:
 
             print(f"Checking filesystem image: {self.img.filepath}")
 
-            # Phase 1 – superblock.  Stop early if the superblock is unreadable
-            # because every later phase relies on its fields.
+            # Phase 1 - superblock. Bail early if broken since later phases depend on it.
             self.check_superblock()
             if self.errors:
                 self._print_results()
                 return False
 
-            # Derive data-block start once and share it with all phases.
             datastart = self._compute_datastart()
 
-            # Accumulator maps: filled by check_inodes_and_blocks and read by
-            # check_link_counts / check_bitmap.
-            used_blocks: Dict[int, List[str]] = defaultdict(list)
-            inode_ref_counts: Dict[int, int]  = defaultdict(int)
-            dir_subdir_counts: Dict[int, int] = defaultdict(int)
-            visited_dirs: Set[int]             = set()
+            used_blocks       = defaultdict(list)
+            inode_ref_counts  = defaultdict(int)
+            dir_subdir_counts = defaultdict(int)
+            visited_dirs      = set()
 
-            # Remaining phases are independent enough to all run so we collect
-            # as many errors as possible in a single pass.
+            # Run the rest together so we surface as many errors as possible in one go
             self.check_inodes_and_blocks(datastart, used_blocks)
             self.check_directories(ROOTINO, ROOTINO, visited_dirs,
                                    inode_ref_counts, dir_subdir_counts)
@@ -133,8 +96,6 @@ class XV6Fsck:
     # Phase 1: Superblock
     # ------------------------------------------------------------------
     def check_superblock(self):
-        # By this point run() has already verified the magic number via a raw
-        # read, so we know sb.magic is correct and can validate other fields.
         sb = self.sb
 
         if sb.size <= 0:
@@ -146,7 +107,7 @@ class XV6Fsck:
         if sb.nlog <= 0:
             self.log_error(f"Log size is invalid: {sb.nlog}")
 
-        # Field ordering must be: logstart < inodestart < bmapstart < size.
+        # Expected disk layout order: logstart < inodestart < bmapstart < size
         if sb.logstart < 2:
             self.log_error(
                 f"logstart ({sb.logstart}) must be >= 2 "
@@ -165,11 +126,9 @@ class XV6Fsck:
                 f"inodestart ({sb.inodestart})"
             )
 
-        # Sanity check: the computed first data block must fit inside the image.
         if sb.size > 0 and sb.ninodes > 0:
-            ninodeblocks = (sb.ninodes + IPB - 1) // IPB
-            nbmapblocks  = (sb.size   + BPB - 1) // BPB
-            datastart    = sb.bmapstart + nbmapblocks
+            nbmapblocks = (sb.size + BPB - 1) // BPB
+            datastart   = sb.bmapstart + nbmapblocks
             if datastart >= sb.size:
                 self.log_error(
                     f"Filesystem too small: computed datastart={datastart} "
@@ -179,38 +138,33 @@ class XV6Fsck:
     # ------------------------------------------------------------------
     # Phase 2: Inode table and block addresses
     # ------------------------------------------------------------------
-    def check_inodes_and_blocks(self, datastart: int,
-                                 used_blocks: Dict[int, List[str]]):
+    def check_inodes_and_blocks(self, datastart, used_blocks):
         sb = self.sb
 
         for inum in range(1, sb.ninodes):
             inode = self.img.read_dinode(inum)
 
-            # Free inodes are skipped; they may contain leftover garbage.
             if inode.type == T_UNUSED:
                 continue
 
-            # Only T_DIR, T_FILE and T_DEVICE are valid non-zero types.
             if inode.type not in (T_DIR, T_FILE, T_DEVICE):
                 self.log_error(
                     f"Inode {inum}: invalid type {inode.type} "
                     f"(expected 1=DIR, 2=FILE, 3=DEVICE)"
                 )
-                # Skip block checks for a structurally bogus inode.
                 continue
 
-            # Directory sizes must align to the dirent record size.
             if inode.type == T_DIR and inode.size % DIRENT_SIZE != 0:
                 self.log_error(
                     f"Directory inode {inum}: size {inode.size} is not a "
                     f"multiple of DIRENT_SIZE ({DIRENT_SIZE})"
                 )
 
-            # --- Direct block pointers ---
+            # Direct block pointers
             for i in range(NDIRECT):
                 b = inode.addrs[i]
                 if b == 0:
-                    continue  # sparse / unallocated block is fine
+                    continue
                 if b < datastart or b >= sb.size:
                     self.log_error(
                         f"Inode {inum}: direct block[{i}] = {b} "
@@ -219,17 +173,17 @@ class XV6Fsck:
                 else:
                     used_blocks[b].append(f"inode {inum} direct[{i}]")
 
-            # --- Indirect block pointer ---
+            # Indirect block pointer
             indir_b = inode.addrs[NDIRECT]
             if indir_b == 0:
-                continue  # no indirect block allocated
+                continue
 
             if indir_b < datastart or indir_b >= sb.size:
                 self.log_error(
                     f"Inode {inum}: indirect pointer block = {indir_b} "
                     f"is out of data range [{datastart}, {sb.size})"
                 )
-                continue  # can't dereference a bad pointer
+                continue
 
             used_blocks[indir_b].append(f"inode {inum} indirect-ptr-block")
 
@@ -246,7 +200,7 @@ class XV6Fsck:
                 else:
                     used_blocks[b].append(f"inode {inum} indirect[{j}]")
 
-        # --- Duplicate block allocation ---
+        # Duplicate block check
         for b, refs in used_blocks.items():
             if len(refs) > 1:
                 self.log_error(
@@ -255,13 +209,10 @@ class XV6Fsck:
                 )
 
     # ------------------------------------------------------------------
-    # Phase 3: Directory structure (recursive DFS from root)
+    # Phase 3: Directory structure (DFS from root)
     # ------------------------------------------------------------------
-    def check_directories(self, inum: int, expected_parent: int,
-                           visited_dirs: Set[int],
-                           inode_ref_counts: Dict[int, int],
-                           dir_subdir_counts: Dict[int, int]):
-        # Guard against directory reference cycles.
+    def check_directories(self, inum, expected_parent, visited_dirs,
+                          inode_ref_counts, dir_subdir_counts):
         if inum in visited_dirs:
             self.log_error(f"Directory loop detected at inode {inum}")
             return
@@ -286,10 +237,9 @@ class XV6Fsck:
             off += DIRENT_SIZE
 
             if de.inum == 0:
-                continue  # empty / deleted slot
+                continue  # empty/deleted slot
 
-            # Inode number must be within the valid range before we do anything
-            # else with it – otherwise read_dinode will raise.
+            # Guard before calling read_dinode so bad dirents don't raise ValueError
             if de.inum >= sb.ninodes:
                 self.log_error(
                     f"Directory {inum}: entry '{de.name}' has inode number "
@@ -314,7 +264,6 @@ class XV6Fsck:
                     )
 
             else:
-                # Regular entry – verify the target inode is allocated.
                 child_inode = self.img.read_dinode(de.inum)
                 if child_inode.type == T_UNUSED:
                     self.log_error(
@@ -322,12 +271,10 @@ class XV6Fsck:
                         f"inode {de.inum} which is free (T_UNUSED)"
                     )
                 elif child_inode.type == T_DIR:
-                    # Count subdirectory for parent nlink check, then recurse.
                     dir_subdir_counts[inum] += 1
                     self.check_directories(de.inum, inum, visited_dirs,
                                            inode_ref_counts, dir_subdir_counts)
                 else:
-                    # T_FILE or T_DEVICE: count this directory reference.
                     inode_ref_counts[de.inum] += 1
 
         if not has_dot:
@@ -338,8 +285,7 @@ class XV6Fsck:
     # ------------------------------------------------------------------
     # Phase 4: Link counts
     # ------------------------------------------------------------------
-    def check_link_counts(self, inode_ref_counts: Dict[int, int],
-                           dir_subdir_counts: Dict[int, int]):
+    def check_link_counts(self, inode_ref_counts, dir_subdir_counts):
         sb = self.sb
         for inum in range(1, sb.ninodes):
             inode = self.img.read_dinode(inum)
@@ -347,9 +293,7 @@ class XV6Fsck:
                 continue
 
             if inode.type == T_DIR:
-                # xv6 rule: a directory's nlink is 1 (for the parent's entry)
-                # plus one for each subdirectory's '..' that points back here.
-                # The '.' entry inside the directory itself is NOT counted.
+                # xv6 dir nlink = 1 + subdirs ('.' is not counted)
                 expected = 1 + dir_subdir_counts[inum]
                 if inode.nlink != expected:
                     self.log_error(
@@ -359,8 +303,6 @@ class XV6Fsck:
                     )
 
             elif inode.type in (T_FILE, T_DEVICE):
-                # For regular files and device files, nlink equals the number
-                # of directory entries pointing to this inode.
                 expected = inode_ref_counts[inum]
                 if inode.nlink != expected:
                     self.log_error(
@@ -372,12 +314,10 @@ class XV6Fsck:
     # ------------------------------------------------------------------
     # Phase 5: Bitmap consistency
     # ------------------------------------------------------------------
-    def check_bitmap(self, datastart: int, referenced_data_blocks: Set[int]):
+    def check_bitmap(self, datastart, referenced_data_blocks):
         sb = self.sb
 
-        # Read the entire bitmap into a set of block numbers that are marked
-        # as allocated (bit == 1).
-        allocated_in_bitmap: Set[int] = set()
+        allocated_in_bitmap = set()
         for base in range(0, sb.size, BPB):
             bblock      = BBLOCK(base, sb)
             bitmap_data = self.img.read_block(bblock)
@@ -388,8 +328,7 @@ class XV6Fsck:
                 if (bitmap_data[byte_idx] & (1 << bit_idx)) != 0:
                     allocated_in_bitmap.add(base + bit_pos)
 
-        # Every metadata block (boot, superblock, log, inode table, bitmap
-        # blocks themselves) must be marked allocated.
+        # Metadata blocks (boot, superblock, log, inodes, bitmap) must all be marked used
         for b in range(datastart):
             if b not in allocated_in_bitmap:
                 self.log_error(
@@ -397,10 +336,10 @@ class XV6Fsck:
                     f"(all metadata blocks must be allocated)"
                 )
 
-        # Cross-check data blocks: used by inode ↔ marked in bitmap.
+        # Data blocks: referenced <-> marked in bitmap
         for b in range(datastart, sb.size):
-            in_use   = b in referenced_data_blocks
-            in_bmap  = b in allocated_in_bitmap
+            in_use  = b in referenced_data_blocks
+            in_bmap = b in allocated_in_bitmap
 
             if in_use and not in_bmap:
                 self.log_error(
@@ -416,7 +355,7 @@ class XV6Fsck:
     # ------------------------------------------------------------------
     # Results
     # ------------------------------------------------------------------
-    def _print_results(self) -> bool:
+    def _print_results(self):
         if not self.errors:
             print("fsck passed: filesystem is clean.")
             return True

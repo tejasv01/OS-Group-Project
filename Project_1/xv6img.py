@@ -1,5 +1,5 @@
-# Low-level access layer for xv6 fs.img (block I/O, dinodes, readi, path lookup).
-# Mirrors kernel/fs.c, skipping the WAL/buffer cache since nothing else writes while mounted.
+# Raw image access for xv6 fs.img (block I/O, dinodes, readi, path resolution).
+# Bypassing the xv6 log here — assumes QEMU isn't running on the same image.
 
 import errno
 from xv6defs import (
@@ -28,7 +28,7 @@ class XV6Image:
         self.close()
 
     def _read_superblock(self):
-        blk = self.read_block(1)  # block 0 is boot sector, superblock sits at block 1
+        blk = self.read_block(1) # block 0 is boot, block 1 is superblock
         sb = Superblock.unpack(blk[:32])
         if sb.magic != FSMAGIC:
             raise ValueError(f"Bad superblock magic: 0x{sb.magic:x} (expected 0x{FSMAGIC:x})")
@@ -63,7 +63,7 @@ class XV6Image:
         buf[off:off + DINODE_SIZE] = dinode.pack()
         self.write_block(bnum, bytes(buf))
 
-    # Port of kernel/fs.c: readi()
+    # Ported from kernel/fs.c readi()
     def readi(self, inum, offset, n):
         if offset < 0:
             raise ValueError("Negative offset")
@@ -83,9 +83,9 @@ class XV6Image:
             boff = pos % BSIZE
             m = min(n - tot, BSIZE - boff)
 
+            # Note to self: alloc=False so reading past/holes doesn't allocate blocks
             addr = alloc.bmap(self, ip, inum, bn, alloc=False)
             if addr == 0:
-                # Sparse/unallocated block reads back as zeroes
                 out.extend(b'\x00' * m)
             else:
                 blk = self.read_block(addr)
@@ -120,10 +120,10 @@ class XV6Image:
         entries = []
         off = 0
         while off < dp.size:
-            raw = self.readi(dp_inum, off, DIRENT_SIZE)
-            if len(raw) < DIRENT_SIZE:
+            data = self.readi(dp_inum, off, DIRENT_SIZE)
+            if len(data) < DIRENT_SIZE:
                 break
-            de = Dirent.unpack(raw)
+            de = Dirent.unpack(data)
             if de.inum != 0:
                 entries.append((de.inum, de.name))
             off += DIRENT_SIZE
@@ -156,7 +156,7 @@ class XV6Image:
         return (cur, name)
 
 
-# Builds a blank fs.img (mostly for unit tests, modeled on mkfs/mkfs.c)
+# Quick helper to build a fresh fs.img (mostly for unit tests, mirrors mkfs.c)
 def create_empty_image(filepath, nblocks=2000, ninodes=200, nlog=30):
     logstart = 2
     inodestart = 2 + nlog
@@ -184,7 +184,7 @@ def create_empty_image(filepath, nblocks=2000, ninodes=200, nlog=30):
         f.seek(1 * BSIZE)
         f.write(sb.pack())
 
-        # Mark metadata blocks + root dir data block as used in bitmap
+        # mark metadata blocks + block datastart (root dir data) as used
         bmap = bytearray(nbmapblocks * BSIZE)
         for b in range(datastart + 1):
             bmap[b // 8] |= (1 << (b % 8))
@@ -192,7 +192,7 @@ def create_empty_image(filepath, nblocks=2000, ninodes=200, nlog=30):
         f.seek(bmapstart * BSIZE)
         f.write(bmap)
 
-        # Root dir (inode 1): xv6 sets nlink=1 for root, '.' isn't counted
+        # root inode = 1; nlink is 1 because xv6 doesn't count '.'
         root_blk = datastart
         root_ip = Dinode(
             type=T_DIR,

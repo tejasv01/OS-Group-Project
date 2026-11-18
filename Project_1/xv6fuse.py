@@ -1,4 +1,4 @@
-# FUSE driver for mounting xv6 fs.img on Linux.
+# FUSE wrapper for mounting xv6 fs.img on Linux.
 
 import os
 import sys
@@ -9,7 +9,7 @@ import errno
 try:
     from fuse import FUSE, FuseOSError, Operations
 except (ImportError, OSError):
-    # Fallback so unit tests can import this module even without libfuse installed
+    # Note to self: lets unit tests import this file even without libfuse on macOS
     Operations = object
     FuseOSError = OSError
     FUSE = None
@@ -20,10 +20,10 @@ import alloc
 import dirops
 
 
-class XV6Fuse(Operations): 
+class XV6Fuse(Operations):
     def __init__(self, img_path):
         self.img = XV6Image(img_path)
-        self.epoch = int(time.time())  # xv6 has no timestamps, so reuse mount time
+        self.epoch = int(time.time()) # xv6 doesn't store timestamps so just use mount time
 
     def getattr(self, path, fh=None):
         inum = self.img.namei(path)
@@ -32,7 +32,7 @@ class XV6Fuse(Operations):
 
         ip = self.img.read_dinode(inum)
         if ip.type == T_DIR:
-            # Linux expects nlink = 2 + subdirs, while xv6 stores 1 + subdirs (skips '.')
+            # Linux expects nlink = 2 + subdirs, xv6 has 1 + subdirs (no '.' link count)
             st_nlink = ip.nlink + 1
             st_mode = stat.S_IFDIR | 0o755
         elif ip.type == T_FILE:
@@ -96,6 +96,7 @@ class XV6Fuse(Operations):
         except OSError as e:
             raise FuseOSError(e.errno)
 
+    # xv6 unlink already handles empty dirs
     def rmdir(self, path):
         try:
             dirops.unlink(self.img, path)
@@ -111,7 +112,7 @@ class XV6Fuse(Operations):
         except OSError as e:
             raise FuseOSError(e.errno)
 
-    # xv6 doesn't track permissions/uid/timestamps; return 0 so tools like cp/touch don't error out
+    # xv6 has no permissions/ownership/times; stub these out so cp/touch work cleanly
     def chmod(self, path, mode):
         return 0
 
