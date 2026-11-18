@@ -20,7 +20,7 @@ import alloc
 import dirops
 
 
-class XV6Fuse(Operations):
+class XV6Fuse(Operations): 
     def __init__(self, img_path):
         self.img = XV6Image(img_path)
         self.epoch = int(time.time())  # xv6 has no timestamps, so reuse mount time
