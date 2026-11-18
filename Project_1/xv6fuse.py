@@ -1,26 +1,18 @@
-"""
-xv6fuse.py - FUSE filesystem implementation for mounting xv6 fs.img on Linux.
-
-Translates Linux VFS operations to xv6 image manipulations via XV6Image,
-dirops, and alloc.
-"""
+# FUSE driver for mounting xv6 fs.img on Linux.
 
 import os
 import sys
 import stat
 import time
 import errno
-from typing import Dict, Any
 
 try:
     from fuse import FUSE, FuseOSError, Operations
-except ImportError:
-    try:
-        from mfusepy import FUSE, FuseOSError, Operations
-    except ImportError:
-        Operations = object
-        FuseOSError = OSError
-        FUSE = None
+except (ImportError, OSError):
+    # Fallback so unit tests can import this module even without libfuse installed
+    Operations = object
+    FuseOSError = OSError
+    FUSE = None
 
 from xv6defs import T_DIR, T_FILE
 from xv6img import XV6Image
@@ -29,24 +21,22 @@ import dirops
 
 
 class XV6Fuse(Operations):
-    def __init__(self, img_path: str):
+    def __init__(self, img_path):
         self.img = XV6Image(img_path)
-        self.epoch = int(time.time())
+        self.epoch = int(time.time())  # xv6 has no timestamps, so reuse mount time
 
-    def getattr(self, path: str, fh: Any = None) -> Dict[str, Any]:
+    def getattr(self, path, fh=None):
         inum = self.img.namei(path)
         if inum is None:
             raise FuseOSError(errno.ENOENT)
 
-        inode = self.img.read_dinode(inum)
-        if inode.type == T_DIR:
-            # Linux tools (like find) expect nlink = 2 + subdirs.
-            # xv6 stores nlink = 1 + subdirs (does not count '.').
-            # We report inode.nlink + 1 to Linux VFS for directories.
-            st_nlink = inode.nlink + 1
+        ip = self.img.read_dinode(inum)
+        if ip.type == T_DIR:
+            # Linux expects nlink = 2 + subdirs, while xv6 stores 1 + subdirs (skips '.')
+            st_nlink = ip.nlink + 1
             st_mode = stat.S_IFDIR | 0o755
-        elif inode.type == T_FILE:
-            st_nlink = inode.nlink
+        elif ip.type == T_FILE:
+            st_nlink = ip.nlink
             st_mode = stat.S_IFREG | 0o644
         else:
             raise FuseOSError(errno.ENOENT)
@@ -54,7 +44,7 @@ class XV6Fuse(Operations):
         return {
             'st_mode': st_mode,
             'st_nlink': st_nlink,
-            'st_size': inode.size,
+            'st_size': ip.size,
             'st_ctime': self.epoch,
             'st_mtime': self.epoch,
             'st_atime': self.epoch,
@@ -62,26 +52,24 @@ class XV6Fuse(Operations):
             'st_gid': os.getgid() if hasattr(os, 'getgid') else 1000,
         }
 
-    def readdir(self, path: str, fh: Any):
+    def readdir(self, path, fh):
         inum = self.img.namei(path)
         if inum is None:
             raise FuseOSError(errno.ENOENT)
 
-        entries = self.img.get_dirents(inum)
-        # Yield unique entry names
         seen = set()
-        for _, name in entries:
+        for _, name in self.img.get_dirents(inum):
             if name not in seen:
                 seen.add(name)
                 yield name
 
-    def read(self, path: str, size: int, offset: int, fh: Any) -> bytes:
+    def read(self, path, size, offset, fh):
         inum = self.img.namei(path)
         if inum is None:
             raise FuseOSError(errno.ENOENT)
         return self.img.readi(inum, offset, size)
 
-    def write(self, path: str, data: bytes, offset: int, fh: Any) -> int:
+    def write(self, path, data, offset, fh):
         inum = self.img.namei(path)
         if inum is None:
             raise FuseOSError(errno.ENOENT)
@@ -90,32 +78,31 @@ class XV6Fuse(Operations):
         except OSError as e:
             raise FuseOSError(e.errno)
 
-    def create(self, path: str, mode: int, fi: Any = None) -> int:
+    def create(self, path, mode, fi=None):
         try:
-            inum = dirops.create(self.img, path, type_=T_FILE)
-            return inum
+            return dirops.create(self.img, path, type_=T_FILE)
         except OSError as e:
             raise FuseOSError(e.errno)
 
-    def mkdir(self, path: str, mode: int) -> None:
+    def mkdir(self, path, mode):
         try:
             dirops.mkdir(self.img, path)
         except OSError as e:
             raise FuseOSError(e.errno)
 
-    def unlink(self, path: str) -> None:
+    def unlink(self, path):
         try:
             dirops.unlink(self.img, path)
         except OSError as e:
             raise FuseOSError(e.errno)
 
-    def rmdir(self, path: str) -> None:
+    def rmdir(self, path):
         try:
             dirops.unlink(self.img, path)
         except OSError as e:
             raise FuseOSError(e.errno)
 
-    def truncate(self, path: str, length: int, fh: Any = None) -> None:
+    def truncate(self, path, length, fh=None):
         inum = self.img.namei(path)
         if inum is None:
             raise FuseOSError(errno.ENOENT)
@@ -124,14 +111,14 @@ class XV6Fuse(Operations):
         except OSError as e:
             raise FuseOSError(e.errno)
 
-    # Linux VFS metadata compatibility stubs
-    def chmod(self, path: str, mode: int) -> int:
+    # xv6 doesn't track permissions/uid/timestamps; return 0 so tools like cp/touch don't error out
+    def chmod(self, path, mode):
         return 0
 
-    def chown(self, path: str, uid: int, gid: int) -> int:
+    def chown(self, path, uid, gid):
         return 0
 
-    def utimens(self, path: str, times: Any = None) -> int:
+    def utimens(self, path, times=None):
         return 0
 
 
@@ -142,16 +129,15 @@ def main():
 
     img_path = sys.argv[1]
     mountpoint = sys.argv[2]
-    foreground = "-f" in sys.argv
+    fg = "-f" in sys.argv
 
     if FUSE is None:
-        print("Error: fusepy or mfusepy is not installed. Install with 'pip install fusepy'")
+        print("Error: fusepy is not installed (or libfuse is missing). Install with 'pip install fusepy'")
         sys.exit(1)
 
-    print(f"Mounting {img_path} at {mountpoint} (foreground={foreground})...")
-    FUSE(XV6Fuse(img_path), mountpoint, nothreads=True, foreground=foreground)
+    print(f"Mounting {img_path} at {mountpoint} (foreground={fg})...")
+    FUSE(XV6Fuse(img_path), mountpoint, nothreads=True, foreground=fg)
 
 
 if __name__ == '__main__':
     main()
-
